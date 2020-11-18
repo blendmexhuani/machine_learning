@@ -1,0 +1,915 @@
+---
+title: "Data Analysis of \"Countries of the world\" dataset"
+author: Blend Mexhuani
+output:
+  pdf_document: 
+    highlight: tango
+always_allow_html: yes
+---
+
+Dataset can be downloaded from: `https://www.kaggle.com/fernandol/countries-of-the-world`
+
+```{r setup, include=FALSE}
+defaultW <- getOption("warn") 
+options(warn = -1)
+```
+```{r message=FALSE, warning=FALSE}
+library(MASS)
+library(car)
+library(caret)
+library(PerformanceAnalytics)
+library(ggplot2)
+library(ggthemes)
+library(ISLR)
+library(leaps)
+library(ggvis)
+library(tidyverse)
+library(glmnet)
+library(pls)
+library(plyr)
+library(kableExtra)
+library(purrr)
+library(lmtest)
+library(alr4)
+library(mgcv)
+library(plotmo)
+
+set.seed(101)
+```
+```{r include=FALSE}
+options(warn = defaultW)
+```
+
+```{r warning=FALSE, include=FALSE}
+data = read.delim2("countries of the world.txt")
+data <- setNames(data, c("Country", "Region", "Population", "Area", "Pop_Density", "Coastline", 
+                    "Net_migration", "Infant_mortality", "GDP", "Literacy", "Phone_using", 
+                    "Arable", "Crops", "Other", "Climate", "Birthrate", "Deathrate", 
+                    "Agriculture", "Industry", "Service"))
+
+attach(data)
+```
+```{r warning=FALSE}
+head(data)
+
+dim(data) # rows = 227, cols = 20
+
+data$Country = as.factor(data$Country)
+data$Region = as.factor(data$Region)
+
+# let's format values in Region variable - substitute spaces with dots
+unique(data$Region)
+data$Region = revalue(data$Region, 
+                      c("ASIA (EX. NEAR EAST)         "     ="ASIA.NEAR.EAST",
+                        "BALTICS                            "="BALTICS",
+                        "EASTERN EUROPE                     "="EASTERN.EUROPE", 
+                        "NORTHERN AFRICA                    "="NORTHERN.AFRICA",
+                        "WESTERN EUROPE                     "="WESTERN.EUROPE", 
+                        "SUB-SAHARAN AFRICA                 "="SUB-SAHARAN.AFRICA", 
+                        "LATIN AMER. & CARIB    "            ="LATIN.AMER.CARIB",
+                        "C.W. OF IND. STATES "               = "C.W.OF.IND.STATES", 
+                        "NEAR EAST                          "="NEAR.EAST", 
+                        "NORTHERN AMERICA                   "="NORTHERN.AMERICA",
+                        "OCEANIA                            "="OCEANIA"))
+
+str(data) # attributes are mostly numeric
+
+summary(data[,3:20])
+```
+
+```{r warning=FALSE}
+sum(is.na(data)) # a total of 110 missing values in all dataset
+sum(!complete.cases(data)) # a total of 48 rows contain missing values
+data=data[complete.cases(data),] #remove all missing observations
+```
+
+```{r}
+chart.Correlation(data[, 3:20], histogram=TRUE, pch=19)
+```
+In the above plot:
+
+* The distribution of each variable is shown on the diagonal.
+* On the bottom of the diagonal : the bivariate scatter plots with a fitted line are displayed
+* On the top of the diagonal : the value of the correlation plus the significance level as stars
+* Each significance level is associated to a symbol : p-values(0, 0.001, 0.01, 0.05, 0.1, 1) <=> symbols(“***”, “**”, “*”, “.”, " “)
+
+## Exploratory Data Analysis (EDA)
+
+### Univariate Exploratory Data Analysis
+
+```{r}
+# here we can see the distribution of the target variable
+par(mfrow=c(2,2))
+hist(Infant_mortality)
+hist(Deathrate)
+hist(Phone_using)
+hist(Net_migration)
+par(mfrow=c(1,2))
+hist(Population)
+hist(log(Population))
+# Plotting the distribution on the log scale (right panel) allows for a more informative inspection.
+par(mfrow=c(1,1))
+boxplot(GDP,
+        col="green",
+        ylab = "GDP",
+        main = "Boxplot for GDP")
+```
+
+### Bivariate Exploratory Data Analysis
+
+```{r warning=FALSE}
+ggplot(data, aes(y=Region, fill=Region)) + 
+  ggtitle("Birthrate per Regions") +
+  geom_bar(aes(weight=Birthrate)) +
+  xlab('Birthrate') +
+  ylab('Regions') +
+  theme(legend.position = "none")
+
+ggplot(data, aes(y=Region, fill=Region)) + 
+  ggtitle("Deathrate per Regions") +
+  geom_bar(aes(weight=Deathrate)) +
+  xlab('Deathrate') +
+  ylab('Regions') +
+  theme(legend.position = "none")
+
+ggplot(data) + 
+  ggtitle("Average GDP per Region") +
+  geom_bar(aes(GDP, Region, fill=Region), stat = "summary", fun.y = "mean") +
+  xlab('GDP') +
+  ylab('Regions') +
+  theme(legend.position = "none")
+
+par(mfrow=c(1,2))
+plot(x=GDP, y=Phone_using, pch=19, col="red")
+plot(x=Birthrate, y=Infant_mortality, pch=19, col="red")
+plot(x=Birthrate, y=Agriculture, pch=19, col="red")
+plot(x=GDP, y=Literacy, pch=19, col="red")
+```
+
+## Modeling and evaluation
+
+```{r}
+lm.model = lm(GDP ~ . - Country, data = data)
+summary(lm.model)
+```
+
+### Best subsets regression methods
+
+We will use the leaps package to implement best subsets regression methods.
+
+* **Forward stepwise selection** Starts with a model that has zero features; it then adds the features one at a time until all the features are added. A selected feature is added in the process that creates a model with the lowest RSS. So, in theory, the first feature selected should be the one that explains the response variable better than any of the others, and so on.
+* **Backward stepwise selection** Begins with all the features in the model and removes the least useful, one at a time
+* **Best subsets models** The algorithm fits a model for all the possible feature combinations; $2^k - 1$ where k is number of features
+
+```{r warning=FALSE}
+# The regsubsets() function (part of the leaps library) performs best subset selection
+# by identifying the best model that contains a given number of predictors, 
+# where best is quantified using RSS.
+
+# By default, regsubsets() only reports results up to the best eight-variable model. 
+# Lets increase that to 28, i.e. all the variables
+
+maxVar = 27
+regfit.full = regsubsets(GDP ~ . - Country, data=data, nvmax=maxVar)
+reg.summary=summary(regfit.full)
+
+# The summary() command outputs the best set of variables for each model size.
+# An asterisk indicates that a given variable is included in the corresponding model
+# It also returns R^2, RSS, adjusted R^2, Cp, and BIC. 
+# We can examine these to try to select the best overall model.
+
+# R^2 increases from 78%, when only one variable is included in the model, 
+# to almost 90%, when all variables are included
+reg.summary$rsq
+
+# Let's plot R2, AdjustedR2, Cp, and BIC for all models to help us decide which model to select.
+tibble(R2 = reg.summary$rsq,
+       Cp = reg.summary$cp, 
+       BIC = reg.summary$bic,
+       AdjustedR2 = reg.summary$adjr2) %>%
+    mutate(id = 1:maxVar) %>%
+    gather(Metric, value, -id) %>%
+    ggplot(aes(id, value, col = Metric)) +
+    geom_line() + geom_point() + ylab('') + 
+    xlab('Number of Variables Used') + 
+    facet_wrap(~ Metric, scales = 'free') +
+    theme_tufte() + scale_x_continuous(breaks = 1:maxVar)
+
+cat("Best R2 model has", which.max(reg.summary$rsq), "predictors\n", 
+    "Best AdjustedR2 model has", which.max(reg.summary$adjr2), "predictors\n", 
+    "Best Cp model has", which.min(reg.summary$cp), "predictors\n", 
+    "Best BIC model has", which.min(reg.summary$bic), "predictors")
+```
+```{r warning=FALSE}
+# The regsubsets() function has a built-in plot() command which displays 
+# the selected variables for the best model with a given number of predictors, 
+# ranked according to R^2, BIC, Cp, adjusted R2
+par(mfrow=c(1,2))
+plot(regfit.full,scale="r2")
+plot(regfit.full,scale="adjr2")
+plot(regfit.full,scale="Cp")
+plot(regfit.full,scale="bic")
+
+coef(regfit.full, which.max(reg.summary$rsq)) # model with highest R2
+coef(regfit.full, which.max(reg.summary$adjr2)) # model with highest AdjustedR2
+coef(regfit.full, which.min(reg.summary$cp)) # model with smallest Cp
+coef(regfit.full, which.min(reg.summary$bic)) # model with smallest BIC
+```
+
+```{r warning=FALSE}
+# Forward and Backward Stepwise Selection
+
+regfit.fwd=regsubsets(GDP ~ . - Country, data=data, nvmax=maxVar, method="forward")
+summary(regfit.fwd)
+regfit.bwd=regsubsets(GDP ~ . - Country, data=data, nvmax=maxVar, method="backward")
+summary(regfit.bwd)
+
+# Using forward stepwise selection, the best one-variable model contains only Phone_using, 
+# and the best two-variable model additionally includes "RegionWESTERN.EUROPE"
+
+cat("Forward Selection:\n", 
+    "Best AdjustedR2 model has", which.max(summary(regfit.fwd)$adjr2), "predictors\n", 
+    "Best Cp model has", which.min(summary(regfit.fwd)$cp), "predictors\n", 
+    "Best BIC model has", which.min(summary(regfit.fwd)$bic), "predictors\n", 
+    "Backward Elimination:\n", 
+    "Best AdjustedR2 model has", which.max(summary(regfit.bwd)$adjr2), "predictors\n", 
+    "Best Cp model has", which.min(summary(regfit.bwd)$cp), "predictors\n", 
+    "Best BIC model has", which.min(summary(regfit.bwd)$bic), "predictors")
+```
+
+```{r}
+coef(regfit.full, 8)
+coef(regfit.fwd, 8)
+coef(regfit.bwd, 8)
+```
+
+For this data, the best one-variable through three-variable models are each identical for best subset, forward selection and backward elimination. However, the best four-variable models identified by forward stepwise selection, backward elimination and best subset selection are different.
+
+```{r warning=FALSE}
+# plotting results for forward and backward subset selection methods
+par(mfrow=c(1,2))
+plot(regfit.fwd, scale="r2")
+plot(regfit.fwd, scale="adjr2")
+plot(regfit.fwd, scale="Cp")
+plot(regfit.fwd, scale="bic")
+
+plot(regfit.bwd, scale="r2")
+plot(regfit.bwd, scale="adjr2")
+plot(regfit.bwd, scale="Cp")
+plot(regfit.bwd, scale="bic")
+```
+
+```{r warning=FALSE}
+# Choosing Among Models using validation set
+
+# If the full data set is used to perform the best subset selection step, the validation set 
+# errors and cross-validation errors that we obtain will not be accurate estimates of the 
+# test error.
+
+# In order to use the validation set approach, we begin by splitting the observations into a
+# training set and a test set.
+
+train = sample(c(TRUE, TRUE, FALSE), nrow(data), rep=TRUE)
+test = (!train)
+
+# train best subset selection
+regfit.best = regsubsets(GDP ~ . - Country, data=data[train,], nvmax=maxVar)
+
+# compute validation set error for the best model of each model size. 
+test.mat = model.matrix(GDP ~ . - Country, data=data[test,])
+
+# run a loop for each size i to extract the coefficients from regfit.best for 
+# the best model of that size, multiply them into the appropriate columns 
+# of the test model matrix to form the predictions, and compute the test MSE.
+val.errors = rep(NA, maxVar)
+
+for(i in 1:maxVar){
+  coefi = coef(regfit.best,id=i)
+  pred = test.mat[,names(coefi)]%*%coefi
+  val.errors[i] = mean((data$GDP[test]-pred)^2)
+}
+val.errors
+
+cat("Best model contains:", which.min(val.errors), "variables\n")
+
+# training error goes up as the model gets bigger
+verr <- as.data.frame(val.errors)
+names(verr) <- "err"
+index <- c(1:nrow(verr))
+verr <- cbind.data.frame(verr,index)
+
+verr %>% 
+  ggvis(x=~ index, y=~err ) %>%
+  layer_points(fill = ~ err , size =~ err ) %>%
+  layer_lines(stroke := "skyblue")%>%
+  add_axis("y", title = "MSE") %>% 
+  add_axis("x", title = "Number of variables")
+
+# the test error
+rss <- as.data.frame(sqrt(regfit.best$rss[-1]/100))
+names(rss) <- "rss"
+verr <- cbind.data.frame(verr,rss)
+
+verr %>% 
+  ggvis(x=~ index) %>%
+  layer_points(y=~rss ,fill = ~ rss , size =~ rss ) %>%
+  layer_lines(y=~rss ,stroke :="purple")%>%
+  add_axis("y", title = "Root MSE") %>% 
+  add_axis("x", title = "Number of variables") %>%
+  layer_points(y=~sqrt(err), fill = ~ sqrt(err) , size =~ sqrt(err) ) %>%
+  layer_lines(y=~sqrt(err), stroke := "skyblue")
+
+# the coefficinets of the best model are:
+coef(regfit.best, which.min(val.errors))
+```
+
+Finally, we perform best subset selection on the full data set, and select the best six-variable model.
+
+It is important that we make use of the full data set in order to obtain more accurate coefficient estimates. Note that we perform best subset selection on the full data set and select the best six- variable model, rather than simply using the variables that were obtained from the training set,because the best six-variable model on the full data set may differ from the corresponding model on the training set.
+
+```{r warning=FALSE}
+regfit.best = regsubsets(GDP ~ . - Country, data=data ,nvmax=maxVar)
+coef(regfit.best, which.min(val.errors))
+```
+
+In fact, we see that the best six-variable model on the full data set has a different set of variables than the best six-variable model on the training set.
+
+```{r warning=FALSE}
+# Choosing among models using 10-fold cross-validation
+
+# write predict function since regsubsets does not have one
+predict.regsubsets=function(object, newdata, id, ...){
+  form = as.formula(object$call[[2]])
+  mat = model.matrix(form,newdata)
+  coefi = coef(object,id=id)
+  xvars =names(coefi)
+  mat[,xvars]%*%coefi
+}
+
+# must perform best subset selection within each of the k training sets
+# create a vector that allocates each observation to one of k=10 folds, 
+# and a matrix in which we will store the results.
+
+k=10
+folds=sample(1:k, nrow(data), replace=TRUE)
+cv.errors=matrix(NA, k, maxVar, dimnames = list(NULL, paste(1:maxVar)))
+cv.errors.fwd=matrix(NA, k, maxVar, dimnames = list(NULL, paste(1:maxVar)))
+cv.errors.bwd=matrix(NA, k, maxVar, dimnames = list(NULL, paste(1:maxVar)))
+
+#write a for loop that performs cross-validation.
+# In the jth fold, the elements of folds that equal j are in the test set, 
+# and the remainder are in the training set. 
+# We make our predictions for each model size (using our new predict.regsubsets() method), 
+# compute the test errors on the appropriate subset, 
+# and store them in the appropriate slot in the matrix cv.errors.
+
+for(j in 1:k){
+  best.fit = regsubsets(GDP ~ . - Country, data=data[folds!=j,], nvmax=maxVar)
+  best.fit.fwd = regsubsets(GDP ~ . - Country, data=data[folds!=j,], nvmax=maxVar, method="forward")
+  best.fit.bwd = regsubsets(GDP ~ . - Country, data=data[folds!=j,], nvmax=maxVar, method="backward")
+  for(i in 1:maxVar){
+    pred = predict.regsubsets(best.fit, data[folds==j,], id=i)
+    cv.errors[j,i] = mean((data$GDP[folds==j]-pred)^2)
+    # forward selection
+    pred = predict.regsubsets(best.fit.fwd, data[folds==j,], id=i)
+    cv.errors.fwd[j,i] = mean((data$GDP[folds==j]-pred)^2)
+    # backward elimination
+    pred = predict.regsubsets(best.fit.bwd, data[folds==j,], id=i)
+    cv.errors.bwd[j,i] = mean((data$GDP[folds==j]-pred)^2)
+  }
+}
+
+# This has given us a 10x27 matrix, of which the (i,j)th element corresponds to the test MSE 
+# for the ith cross-validation fold for the best j-variable model. 
+# use the apply() function to average over the columns of this matrix to obtain a vector 
+# for which the jth element is the cross- validation error for the j-variable model.
+
+mean.cv.errors = apply(cv.errors, 2, mean)
+regsubset.coef = which.min(mean.cv.errors)
+# forward selection
+mean.cv.errors.fwd = apply(cv.errors.fwd, 2, mean)
+regsubset.coef.fwd = which.min(mean.cv.errors.fwd)
+# backward elimination
+mean.cv.errors.bwd = apply(cv.errors.bwd, 2, mean)
+regsubset.coef.bwd = which.min(mean.cv.errors.bwd)
+
+cat("Best model contains:", regsubset.coef, "variables\n", 
+    "Best model using forward selection contains:", regsubset.coef.fwd, "variables\n", 
+    "Best model using backward elimination contains:", regsubset.coef.bwd, "variables\n")
+
+par(mfrow=c(1,1))
+plot(mean.cv.errors, pch = 19, type = "b", ylab = "Mean 10-fold CV Error")
+plot(mean.cv.errors.fwd, pch = 19, type = "b", ylab = "Mean 10-fold CV Error")
+plot(mean.cv.errors.bwd, pch = 19, type = "b", ylab = "Mean 10-fold CV Error")
+```
+
+We now perform best subset selection on the full data set in order to obtain the 6-variable model.
+
+```{r warning=FALSE}
+regsubset.model = regsubsets(GDP ~ . - Country, data=data, nvmax=maxVar)
+print("Best subsets selection:")
+coef(regsubset.model, regsubset.coef)
+regsubset.model.fwd = regsubsets(GDP ~ . - Country, data=data, nvmax=maxVar, method="forward")
+print("Forward stepwise selection:")
+coef(regsubset.model.fwd, regsubset.coef.fwd)
+regsubset.model.bwd = regsubsets(GDP ~ . - Country, data=data, nvmax=maxVar, method="backward")
+print("Backward stepwise selection:")
+coef(regsubset.model.bwd, regsubset.coef.bwd)
+```
+
+```{r}
+tibble(R2 = summary(regsubset.model)$rsq,
+       Cp = summary(regsubset.model)$cp, 
+       BIC = summary(regsubset.model)$bic,
+       AdjustedR2 = summary(regsubset.model)$adjr2) %>%
+    mutate(id = 1:maxVar) %>%
+    gather(Metric, value, -id) %>%
+    ggplot(aes(id, value, col = Metric)) +
+    geom_line() + geom_point() + ylab('') + 
+    xlab('Number of Variables Used') + 
+    facet_wrap(~ Metric, scales = 'free') +
+    theme_tufte() + scale_x_continuous(breaks = 1:maxVar)
+
+cat("Best subsets selection:\n", 
+    "Best R2 model has", which.max(summary(regsubset.model)$rsq), "predictors\n", 
+    "Best AdjustedR2 model has", which.max(summary(regsubset.model)$adjr2), "predictors\n", 
+    "Best Cp model has", which.min(summary(regsubset.model)$cp), "predictors\n", 
+    "Best BIC model has", which.min(summary(regsubset.model)$bic), "predictors\n\n")
+
+tibble(R2 = summary(regsubset.model.fwd)$rsq,
+       Cp = summary(regsubset.model.fwd)$cp, 
+       BIC = summary(regsubset.model.fwd)$bic,
+       AdjustedR2 = summary(regsubset.model.fwd)$adjr2) %>%
+    mutate(id = 1:maxVar) %>%
+    gather(Metric, value, -id) %>%
+    ggplot(aes(id, value, col = Metric)) +
+    geom_line() + geom_point() + ylab('') + 
+    xlab('Number of Variables Used') + 
+    facet_wrap(~ Metric, scales = 'free') +
+    theme_tufte() + scale_x_continuous(breaks = 1:maxVar)
+
+cat("Forward stepwise selection:\n", 
+    "Best R2 model has", which.max(summary(regsubset.model.fwd)$rsq), "predictors\n", 
+    "Best AdjustedR2 model has", which.max(summary(regsubset.model.fwd)$adjr2), "predictors\n", 
+    "Best Cp model has", which.min(summary(regsubset.model.fwd)$cp), "predictors\n", 
+    "Best BIC model has", which.min(summary(regsubset.model.fwd)$bic), "predictors\n\n")
+
+tibble(R2 = summary(regsubset.model.bwd)$rsq,
+       Cp = summary(regsubset.model.bwd)$cp, 
+       BIC = summary(regsubset.model.bwd)$bic,
+       AdjustedR2 = summary(regsubset.model.bwd)$adjr2) %>%
+    mutate(id = 1:maxVar) %>%
+    gather(Metric, value, -id) %>%
+    ggplot(aes(id, value, col = Metric)) +
+    geom_line() + geom_point() + ylab('') + 
+    xlab('Number of Variables Used') + 
+    facet_wrap(~ Metric, scales = 'free') +
+    theme_tufte() + scale_x_continuous(breaks = 1:maxVar)
+
+cat("Backward stepwise selection:\n", 
+    "Best R2 model has", which.max(summary(regsubset.model.bwd)$rsq), "predictors\n", 
+    "Best AdjustedR2 model has", which.max(summary(regsubset.model.bwd)$adjr2), "predictors\n", 
+    "Best Cp model has", which.min(summary(regsubset.model.bwd)$cp), "predictors\n", 
+    "Best BIC model has", which.min(summary(regsubset.model.bwd)$bic), "predictors\n\n")
+```
+
+The best six-variable model (choosen from 10-fold cross-validation method) has a different set of variables than the best six-variable model on the full dataset.
+
+```{r echo=FALSE, warning=FALSE}
+get_model_predictors <- function(predictors){
+  # Get predictors
+  predictors <- gsub("Region", "(Region == '", predictors)
+  predictors <- gsub("ASIA.NEAR.EAST", "ASIA.NEAR.EAST')", predictors)
+  predictors <- gsub("EASTERN.EUROPE", "EASTERN.EUROPE')", predictors)
+  predictors <- gsub("NORTHERN.AFRICA", "NORTHERN.AFRICA')", predictors)
+  predictors <- gsub("LATIN.AMER.CARIB", "LATIN.AMER.CARIB')", predictors)
+  predictors <- gsub("C.W.OF.IND.STATES", "C.W.OF.IND.STATES')", predictors)
+  predictors <- gsub("OCEANIA", "OCEANIA')", predictors)
+  predictors <- gsub("WESTERN.EUROPE", "WESTERN.EUROPE')", predictors)
+  predictors <- gsub("NEAR.EAST", "NEAR.EAST')", predictors)
+  predictors <- gsub("SUB-SAHARAN.AFRICA", "SUB-SAHARAN.AFRICA')", predictors)
+  predictors <- gsub("NORTHERN.AMERICA", "NORTHERN.AMERICA')", predictors)
+  predictors <- gsub("BALTICS", "BALTICS')", predictors)
+  predictors <- paste(predictors, collapse = " + ")
+}
+
+show_diagnostics <- function(model, model.formula){
+  par(mfrow=c(3,2))
+  plot(model)
+  hist(residuals(model),breaks=10,freq=FALSE,xlab="Residual", main="")
+  curve(dnorm(x,mean=0,sd=sd(residuals(model))),add=TRUE,col="blue")
+  plot(fitted(model) ~ GDP, data)
+  abline(lm(fitted(model) ~ GDP, data), col="red")
+  par(mfrow=c(1,1))
+  
+  print(anova(model))
+  influenceIndexPlot(model)
+  print(outlierTest(model))
+}
+
+run_tests <- function(model){
+  # testing for normal distribution by using Shapiro-Wilk Test
+  print(shapiro.test(residuals(model)))
+  # testing for non-constant variance using Breusch-Pagan Test
+  bptest(model)
+}
+```
+
+```{r warning=FALSE}
+reg_names <- names(coef(regsubset.model, regsubset.coef))[-1]
+
+regsubset <- lm (as.formula(paste0("GDP ~ ", get_model_predictors(reg_names))), data)
+summary(regsubset)
+
+# show diagnostics for the model
+show_diagnostics(regsubset)
+run_tests(regsubset)
+
+# Transforming the model by using Box-cox transformation
+bc <- boxcox(regsubset, plotit = FALSE, lambda = seq(-1, 1, by = 0.1))
+best_lambda <- bc$x[which.max(bc$y)]
+
+regsubset.tr <- lm (as.formula(paste0("(GDP^best_lambda) ~ ", 
+                                      get_model_predictors(reg_names))), data)
+summary(regsubset.tr)
+
+# show diagnostics after transformation of the model
+show_diagnostics(regsubset.tr)
+run_tests(regsubset.tr)
+```
+
+
+```{r warning=FALSE}
+reg_names.fwd <- names(coef(regsubset.model.fwd, regsubset.coef.fwd))[-1]
+
+regsubset.fwd <- lm (as.formula(paste0("GDP ~ ", get_model_predictors(reg_names.fwd))), data)
+summary(regsubset.fwd)
+
+# show diagnostics for the model
+show_diagnostics(regsubset.fwd)
+run_tests(regsubset.fwd)
+
+# Transforming the model by using Box-cox transformation
+bc <- boxcox(regsubset.fwd, plotit = FALSE, lambda = seq(-1, 1, by = 0.1))
+best_lambda_fwd <- bc$x[which.max(bc$y)]
+
+regsubset.fwd.tr <- lm (as.formula(paste0("(GDP^best_lambda_fwd) ~ ", 
+                                          get_model_predictors(reg_names.fwd))), data)
+summary(regsubset.fwd.tr)
+
+# show diagnostics after transformation of the model
+show_diagnostics(regsubset.fwd.tr)
+run_tests(regsubset.fwd.tr)
+```
+
+```{r warning=FALSE}
+reg_names.bwd <- names(coef(regsubset.model.bwd, regsubset.coef.bwd))[-1]
+
+regsubset.bwd <- lm (as.formula(paste0("GDP ~ ", get_model_predictors(reg_names.bwd))), data)
+summary(regsubset.bwd)
+
+# show diagnostics for the model
+show_diagnostics(regsubset.bwd)
+run_tests(regsubset.bwd)
+
+# Transforming the model by using Box-cox transformation
+bc <- boxcox(regsubset.bwd, plotit = FALSE, lambda = seq(-1, 1, by = 0.1))
+best_lambda_bwd <- bc$x[which.max(bc$y)]
+
+regsubset.bwd.tr <- lm (as.formula(paste0("(GDP^best_lambda_bwd) ~ ", 
+                                          get_model_predictors(reg_names.bwd))), data)
+summary(regsubset.bwd.tr)
+
+# show diagnostics after transformation of the model
+show_diagnostics(regsubset.bwd.tr)
+run_tests(regsubset.bwd.tr)
+```
+
+### Ridge Regression
+
+```{r warning=FALSE}
+x = model.matrix(GDP ~ . - Country, data)[,-1]
+y = data$GDP
+
+grid = 10^seq(10, -2, length = 100)
+ridge.mod = glmnet(x, y, alpha = 0, lambda = grid)
+plot(ridge.mod)
+cv.ridge = cv.glmnet(x, y, alpha = 0)
+plot(cv.ridge)
+ridge.lambda = cv.ridge$lambda.min
+cat("Best lambda:", ridge.lambda, "\n")
+ridge.coef = predict(ridge.mod, type = "coefficients", s = ridge.lambda)[1:28,]
+ridge.coef[ridge.coef != 0]
+```
+
+### Least Absolute Shrinkage and Selection Operator (LASSO)
+
+```{r warning=FALSE}
+lasso.mod = glmnet(x, y, alpha = 1, lambda = grid)
+plot(lasso.mod)
+cv.lasso = cv.glmnet(x, y, alpha=1)
+plot(cv.lasso)
+lasso.lambda = cv.lasso$lambda.min
+cat("Best lambda:", lasso.lambda, "\n")
+lasso.coef = predict(lasso.mod, type="coefficients", s=lasso.lambda)[1:28,]
+lasso.coef[lasso.coef != 0]
+```
+
+### Principal Components Regression
+
+```{r warning=FALSE}
+# Build the model on training set
+pcr.model <- train(
+  GDP ~ . - Country, data = data, 
+  method = "pcr",
+  scale = TRUE,
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+
+par(mfrow=c(1,1))
+# Plot model RMSE vs different values of components
+plot(pcr.model)
+# Print the best tuning parameter ncomp that
+# minimize the cross-validation error, RMSE
+pcr.model$bestTune
+
+# Summarize the final model
+summary(pcr.model$finalModel)
+
+# Make predictions
+# pcr.pred <- pcr.model %>% predict(data[test, ])
+```
+
+The plot shows the prediction error (RMSE) made by the model according to the number of principal components incorporated in it. Choosing ten principal components (ncomp = 10) gives the smallest prediction error RMSE.
+
+From the summary() function we can see the percentage of variance explained in the predictors (x) and in the outcome (medv). 75.73% of the variation contained in the predictors are captured by 10 principal components. Setting ncomp = 10, captures 84.96% of the information in the outcome variable.
+
+### Partial Least Squares
+
+```{r warning=FALSE}
+# Build the model on training set
+pls.model <- train(
+ GDP ~ . - Country, data = data,
+ method = "pls",
+ scale = TRUE,
+ trControl = trainControl("cv", number = 10),
+ tuneLength = 10
+)
+# Plot model RMSE vs different values of components
+plot(pls.model)
+
+# Print the best tuning parameter ncomp that
+# minimize the cross-validation error, RMSE
+pls.model$bestTune
+
+# Summarize the final model
+summary(pls.model$finalModel)
+
+# Make predictions
+# pls.pred <- pls.model %>% predict(data[test, ])
+```
+
+The optimal number of principal components included in the PLS model is 4. This captures 41.55% of the variation in the predictors and 88.37% of the variation in the outcome variable.
+
+### Additive Model
+
+```{r}
+# Building the model
+add.model <- gam(GDP ~ s(Net_migration) + s(Infant_mortality) + s(Phone_using) + s(Other), data=data)
+```
+
+In the table below are displayed all of the methods used for model selection and their coefficients.
+
+```{r echo=FALSE, warning=FALSE}
+ridge_names <- names(ridge.coef[ridge.coef != 0])[-1]
+lasso_names <- names(lasso.coef[lasso.coef != 0])[-1]
+pcr_coef <- coef(pcr.model$finalModel, pcr.model$bestTune$ncomp)
+pcr_names <- row.names(pcr_coef)[which(pcr_coef!=0)][-1]
+pls_coef <- coef(pls.model$finalModel, pls.model$bestTune$ncomp)
+pls_names <- row.names(pls_coef)[which(pls_coef!=0)][-1]
+```
+
+```{r echo=FALSE, warning=FALSE}
+bestModels <- data.frame(
+  Method = c(paste("Best subset ( BIC with ", regsubset.coef, "coefficients )"),
+             paste("Forward stepwise ( BIC with ", regsubset.coef.bwd, "coefficients )"),
+             paste("Backward stepwise ( BIC with ", regsubset.coef.bwd, "coefficients )"),
+             paste("Ridge Regression ( lambda =", round(ridge.lambda, 3), ")"),
+             paste("LASSO ( lambda =", round(lasso.lambda, 3), ")"),
+             paste("Principal Components Regression ( ncomp =", pcr.model$bestTune$ncomp, ")"),
+             paste("Partial Least Squares ( ncomp =", pls.model$bestTune$ncomp, ")"),
+             paste("Additive Model")),
+  Model = c(paste(reg_names, collapse = " + "), 
+            paste(reg_names.fwd, collapse = " + "), 
+            paste(reg_names.bwd, collapse = " + "), 
+            paste(ridge_names, collapse = " + "),
+            paste(lasso_names, collapse = " + "),
+            paste(pcr_names, collapse = " + "),
+            paste(pls_names, collapse = " + "),
+            paste(gsub("GDP ~ ", "", add.model$call[[2]])[3]))
+)
+
+kable(bestModels) %>%
+  kable_styling(bootstrap_options = 
+                  c("striped", "hover", "condensed", "responsive"), full_width = F) %>%
+  column_spec(1, bold = T, width="10em") %>%
+  column_spec(2, width="36em")
+```
+
+## Summary of the final models and some diagnostics plots
+
+```{r warning=FALSE}
+# Summary statistics
+ridge.bestModel = glmnet(x, y, alpha = 0, lambda = ridge.lambda)
+lasso.bestModel = glmnet(x, y, alpha = 1, lambda = lasso.lambda)
+pcr.bestModel = pcr(GDP ~ . - Country, data=data, scale=TRUE, ncomp=pcr.model$bestTune$ncomp)
+pls.bestModel = plsr(GDP ~ . - Country, data=data, scale=TRUE, ncomp=pls.model$bestTune$ncomp)
+
+print("Best subset selection:")
+summary(regsubset.tr)
+confint(regsubset.tr, level = 0.95)
+
+print("Forward selection coefficients:")
+summary(regsubset.fwd.tr)
+confint(regsubset.fwd.tr, level = 0.95)
+
+print("Backward elimination coefficients:")
+summary(regsubset.bwd.tr)
+confint(regsubset.bwd.tr, level = 0.95)
+
+print("Ridge coefficients:"); ridge.coef[ridge.coef != 0]
+print("LASSO coefficients:"); lasso.coef[lasso.coef != 0]
+print("PCR coefficients:"); pcr_coef
+print("PLS coefficients:"); pls_coef
+
+print("Additive model coefficients:")
+summary(add.model)
+
+# Plotting
+par(mfrow=c(2,2))
+plot(regsubset.tr)
+plot(regsubset.fwd.tr)
+plot(regsubset.bwd.tr)
+
+par(mfrow=c(1,2))
+plotres(ridge.bestModel, 3, main="Residuals vs Fitted (s=1629.637)")
+plotres(ridge.bestModel, 4)
+plotres(lasso.bestModel, 3, main="Residuals vs Fitted (s=247.69)")
+plotres(lasso.bestModel, 4)
+
+par(mfrow=c(2,2))
+plot(pcr.bestModel, line=TRUE)
+plot(fitted(pcr.bestModel),
+     resid(pcr.bestModel),
+     xlab="Fitted values",
+     ylab="Residuals")
+abline(0, 0, col="red")
+hist(residuals(pcr.bestModel),breaks=10,freq=FALSE,xlab="Residual", main="")
+curve(dnorm(x,mean=0,sd=sd(residuals(pcr.bestModel))),add=TRUE,col="blue")
+validationplot(pcr.bestModel, val.type="MSEP", legendpos='topright', main='PCR cross-validation')
+run_tests(pcr.bestModel)
+
+plot(pls.bestModel, line=TRUE)
+plot(fitted(pls.bestModel),
+     resid(pls.bestModel),
+     xlab="Fitted values",
+     ylab="Residuals")
+abline(0, 0, col="red")
+hist(residuals(pls.bestModel),breaks=10,freq=FALSE,xlab="Residual", main="")
+curve(dnorm(x,mean=0,sd=sd(residuals(pls.bestModel))),add=TRUE,col="blue")
+validationplot(pls.bestModel, val.type="MSEP", legendpos='topright', main='PLS cross-validation')
+run_tests(pls.bestModel)
+
+gam.check(add.model)
+run_tests(add.model)
+```
+
+### CV to select the best model from those that we tried
+
+```{r}
+k=10
+folds=sample(1:k, nrow(data), replace=TRUE)
+cv.errors = matrix(NA, k, 8, dimnames = list(NULL, paste(1:8)))
+
+for(j in 1:k){
+  regsubsets.fit = regsubsets(GDP^best_lambda ~ . - Country, data=data[folds!=j,], 
+                              nvmax=maxVar)
+  pred = predict.regsubsets(regsubsets.fit, data[folds==j,], id=regsubset.coef)
+  cv.errors[j,1] = sqrt(mean((data$GDP[folds==j] - pred^(1/best_lambda))^2))
+  
+  regsubsets.fwd.fit = regsubsets(GDP^best_lambda_fwd ~ . - Country, data=data[folds!=j,], 
+                                  nvmax=maxVar, method="forward")
+  pred = predict.regsubsets(regsubsets.fwd.fit, data[folds==j,], id=regsubset.coef.fwd)
+  cv.errors[j,2] = sqrt(mean((data$GDP[folds==j] - pred^(1/best_lambda_fwd))^2))
+  
+  regsubsets.bwd.fit = regsubsets(GDP^best_lambda_bwd ~ . - Country, data=data[folds!=j,], 
+                                  nvmax=maxVar, method="backward")
+  pred = predict.regsubsets(regsubsets.bwd.fit, data[folds==j,], id=regsubset.coef.bwd)
+  cv.errors[j,3] = sqrt(mean((data$GDP[folds==j] - pred^(1/best_lambda_bwd))^2))
+
+  ridge.fit = glmnet(x[folds!=j,], y[folds!=j], alpha=0, lambda=ridge.lambda)
+  pred = predict(ridge.fit, s = ridge.lambda, newx = x[folds==j,])
+  cv.errors[j,4] = sqrt(mean((pred - y[folds==j])^2))
+  
+  lasso.fit = glmnet(x[folds!=j,], y[folds!=j], alpha=1, lambda=lasso.lambda)
+  pred = predict(lasso.fit, s = lasso.lambda, newx = x[folds==j,])
+  cv.errors[j,5] = sqrt(mean((pred - y[folds==j])^2))
+  
+  pcr.fit = pcr(GDP ~ . - Country, data=data[folds!=j,], scale=TRUE, 
+                ncomp=pcr.model$bestTune$ncomp)
+  pred = predict(pcr.fit, x[folds==j,], scale=TRUE, ncomp=pcr.model$bestTune$ncomp)
+  cv.errors[j,6] = sqrt(mean((pred - y[folds==j])^2))
+  
+  pls.fit = plsr(GDP ~ . - Country, data=data[folds!=j,], scale=TRUE, 
+                 ncomp=pls.model$bestTune$ncomp)
+  pred = predict(pls.fit, x[folds==j,], scale=TRUE, ncomp=pls.model$bestTune$ncomp)
+  cv.errors[j,7] = sqrt(mean((pred - y[folds==j])^2))
+  
+  add.fit <- gam(GDP ~ s(Net_migration) + s(Infant_mortality) + s(Phone_using) + s(Other),
+                 data=data[folds!=j,])
+  pred = predict(add.fit, data[folds==j,])
+  cv.errors[j,8] = sqrt(mean((data$GDP[folds==j] - pred)^2))
+}
+
+mean.cv.errors = apply(cv.errors, 2, mean)
+
+data.frame(
+  Method = c("Best subsets", 
+             "Forward stepwise",
+             "Backward stepwise",
+             "Ridge Regression",
+             "LASSO",
+             "Principal Components Regression",
+             "Partial Least Squares",
+             "Additive Model"),
+  RMSE = c(mean.cv.errors[1],
+           mean.cv.errors[2],
+           mean.cv.errors[3],
+           mean.cv.errors[4],
+           mean.cv.errors[5],
+           mean.cv.errors[6],
+           mean.cv.errors[7],
+           mean.cv.errors[8])
+)
+```
+
+From the results above, we see that **Additive Model** has the lowest `RMSE=3244.438` therefore is the best model across all we experimented. We see that **LASSO** is the second best model with `lambda=247.69` and `RMSE=3669.819`
+
+### Using holdout method
+
+```{r}
+regsubsets.train = regsubsets(GDP^best_lambda ~ . - Country, data=data[train,], 
+                              nvmax=maxVar)
+regsubsets.fwd.train = regsubsets(GDP^best_lambda_fwd ~ . - Country, data=data[train,], 
+                                  nvmax=maxVar, method="forward")
+regsubsets.bwd.train = regsubsets(GDP^best_lambda_bwd ~ . - Country, data=data[train,], 
+                                  nvmax=maxVar, method="backward")
+ridge.train = glmnet(x[train,], y[train], alpha = 0, lambda = ridge.lambda)
+lasso.train = glmnet(x[train,], y[train], alpha = 1, lambda = lasso.lambda)
+pcr.train = pcr(GDP ~ . - Country, data=data[train,], scale=TRUE, 
+                ncomp=pcr.model$bestTune$ncomp)
+pls.train = plsr(GDP ~ . - Country, data=data[train,], scale=TRUE, 
+                 ncomp=pls.model$bestTune$ncomp)
+add.train <- gam(GDP ~ s(Net_migration) + s(Infant_mortality) + s(Phone_using) + 
+                   s(Other), data=data[train,])
+
+cv.errors = matrix(NA, 1, 8, dimnames = list(NULL, paste(1:8)))
+pred = predict.regsubsets(regsubsets.train, data[test,], id=regsubset.coef)
+cv.errors[1] = sqrt(mean((data$GDP[test] - pred^(1/best_lambda))^2))
+pred = predict.regsubsets(regsubsets.fwd.train, data[test,], id=regsubset.coef.fwd)
+cv.errors[2] = sqrt(mean((data$GDP[test] - pred^(1/best_lambda_fwd))^2))
+pred = predict.regsubsets(regsubsets.bwd.train, data[test,], id=regsubset.coef.bwd)
+cv.errors[3] = sqrt(mean((data$GDP[test] - pred^(1/best_lambda_bwd))^2))
+pred = predict(ridge.train, s = ridge.lambda, newx = x[test,])
+cv.errors[4] = sqrt(mean((pred - y[test])^2))
+pred = predict(lasso.train, s = lasso.lambda, newx = x[test,])
+cv.errors[5] = sqrt(mean((pred - y[test])^2))
+pred = predict(pcr.train, x[test,], scale=TRUE, ncomp=pcr.model$bestTune$ncomp)
+cv.errors[6] = sqrt(mean((pred - y[test])^2))
+pred = predict(pls.train, x[test,], scale=TRUE, ncomp=pls.model$bestTune$ncomp)
+cv.errors[7] = sqrt(mean((pred - y[test])^2))
+pred = predict(add.train, data[test,])
+cv.errors[8] = sqrt(mean((data$GDP[test] - pred)^2))
+
+data.frame(
+  Method = c("Best subsets", 
+             "Forward stepwise",
+             "Backward stepwise",
+             "Ridge Regression",
+             "LASSO",
+             "Principal Components Regression",
+             "Partial Least Squares",
+             "Additive Model"),
+  RMSE = c(cv.errors[1],
+           cv.errors[2],
+           cv.errors[3],
+           cv.errors[4],
+           cv.errors[5],
+           cv.errors[6],
+           cv.errors[7],
+           cv.errors[8])
+)
+```
+
+Same as when using 10-fold cross-validation method, **Additive Model** gave us the best results with `RMSE=3732.759`
